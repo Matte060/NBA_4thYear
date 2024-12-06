@@ -1,0 +1,505 @@
+---
+title: "Project 2"
+author: "Matteo Cecchetto"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+# Question 1)
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE, warning=FALSE}
+#Importing Packages
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(GGally)
+library(ISLR2)
+library(MASS)
+library(glmnet)
+library(caret)
+library(randomForest)
+library(tree)
+library(boot)
+```
+
+```{r, include = FALSE}
+#Importing Data sets
+All_Star_Selections <- read.csv("C:/Users/guest_5m51ow7/OneDrive/Documents/School/Stat 462/Project 2 Files/All-Star Selections.csv")
+
+Player_Per_Game <- read.csv("C:/Users/guest_5m51ow7/OneDrive/Documents/School/Stat 462/Project 2 Files/Player Per Game.csv")
+
+Team_Stats <- read.csv("C:/Users/guest_5m51ow7/OneDrive/Documents/School/Stat 462/Project 2 Files/Team Summaries.csv")
+
+win_percentage <- Team_Stats %>%
+  group_by(season, ) %>%
+  mutate(win_pct = w/(w+l)) %>%
+  ungroup()
+win_percentage$tm = win_percentage$abbreviation
+
+#Creating a Working Dataset for Project
+player_all_star <- merge(Player_Per_Game, All_Star_Selections, all.x = TRUE)
+for (i in 1:31633){
+  if(is.na(player_all_star$team[i]) == FALSE){
+    player_all_star$all_star[i] = 1
+  }else{
+    player_all_star$all_star[i] = 0
+  }
+}
+
+player_all_star$all_star <- as.factor(player_all_star$all_star)
+```
+
+## Data
+
+#### Trimming and cleaning up data
+
+Seasons prior to the 1980 Season were removed as prior to the 1980s stat tracking in the NBA was minimal, and the 3 point line has yet to be introduced.
+
+Additionally, the 1999, and the 2024 All-Star Game did not happen or haven't happened yet, so the current season will also be excluded
+
+Additionally, the list will be limited to NBA players only, due to the far better data collection available, and keep the parameters consistent
+
+```{r, include = FALSE}
+modern_data <- filter(player_all_star,  between(season, 1980, 1998) | between(season, 2000,2023), lg == "NBA")
+
+full_modern_data <- merge(modern_data, win_percentage, by = c("tm", "season"), all.x = TRUE)
+```
+
+Other removed predictors:
+
+Birth year, as it was NA except for players first season and wasn't terribly relevant to our experiment.
+
+Player, season ID, the keeping track of player was to be done by player_ID.
+
+Team/Replaced, holdovers from merge of data set, unnecessary.
+
+Team, although I would have liked to include it a factor of more than 35 levels is not allowed, so I have removed it.
+
+Additionally, if stats weren't tracked or not introduced they have been replaced by 0
+
+```{r, include = FALSE}
+trimmed_modern_data <- dplyr::select(full_modern_data, c(season, player_id, pos:pts_per_game, all_star, win_pct))
+
+trimmed_modern_data = trimmed_modern_data[!is.na(trimmed_modern_data$win_pct), ]
+
+for (i in 1:nrow(trimmed_modern_data)) {
+  for (j in 1:ncol(trimmed_modern_data)) {
+    if (is.na(trimmed_modern_data[i, j])) {
+      trimmed_modern_data[i, j] <- 0
+    }
+  }
+}
+
+trimmed_modern_data$pos <- as.factor(trimmed_modern_data$pos)
+```
+
+#### Data Visualization
+
+```{r, echo = FALSE}
+trimmed_modern_data %>%
+  group_by(season) %>%
+  summarise(all_star_amount = sum(as.numeric(all_star)-1)) %>%
+  ungroup() %>%
+  ggplot(., mapping = aes(x = season, y = all_star_amount)) +
+    geom_line(color = "blue") +
+    geom_point(color = "lightblue")
+
+trimmed_modern_data %>%
+  group_by(pos) %>%
+  summarise(all_star_amount = sum(as.numeric(all_star)-1)) %>%
+  ungroup() %>%
+  ggplot(., mapping = aes(x = pos, y = all_star_amount)) +
+    geom_col(mapping = aes(fill = pos))
+
+trimmed_modern_data %>%
+  group_by(age.x) %>%
+  summarise(all_star_amount = sum(as.numeric(all_star)-1)) %>%
+  ungroup() %>%
+  ggplot(., mapping = aes(x = age.x, y = all_star_amount, col = "black")) +
+    geom_col(fill = "orange") +
+    geom_line(mapping = aes(x = mean(age.x), color = "green"))
+
+ggplot(trimmed_modern_data, aes(x = win_pct, y = pts_per_game)) +
+  geom_point(aes(col = all_star))
+
+ggplot(trimmed_modern_data, aes(x = season, 
+                                y = pts_per_game + 
+                                  trb_per_game + 
+                                  ast_per_game)) +
+  geom_point(aes(col = all_star))+ 
+  stat_summary(fun = mean, geom = "line", aes(group = 1), color = "black", size = 1)+
+  labs(color = "All Star")
+
+```
+
+## Methods
+
+#### Simple Dataset
+
+Creating training and testing datasets
+
+```{r, include=FALSE}
+set.seed(6)
+index <- sample(nrow(trimmed_modern_data), nrow(trimmed_modern_data) * 0.7)
+train <- trimmed_modern_data[index, ]
+test <- trimmed_modern_data[-index, ]
+```
+
+##### Creating simple Logistic Model
+
+```{r}
+model <- glm(all_star ~., family = binomial, data = train)
+require(nnet)
+model2 <- multinom(all_star ~., family = binomial, data = train)
+```
+
+Testing Predictions
+
+```{r, message= FALSE}
+pred= predict(model, test, type="response")
+binary_pred = as.numeric(pred>=0.5)
+accuracy.glm1 <- mean(binary_pred == test$all_star)
+accuracy.glm1
+
+pred= predict(model2, test)
+accuracy.multinom1 <- mean(pred == test$all_star)
+accuracy.multinom1
+
+confusion_matrix <- confusionMatrix(factor(binary_pred), factor(test$all_star))
+```
+
+##### Tree
+
+```{r, include = FALSE}
+#TREE
+tree.all_star <- tree(all_star ~., data = train)
+plot(tree.all_star)
+text(tree.all_star, pretty = 0)
+
+#Tree pruning
+cv.all_star <- cv.tree(tree.all_star)
+plot(cv.all_star$size, cv.all_star$dev, type='b')
+
+prune.all_star = prune.tree(tree.all_star, best = 7)
+plot(prune.all_star)
+text(prune.all_star,pretty =0)
+
+tree.pred = predict(prune.all_star, newdata = test)
+binary_pred = as.numeric(tree.pred<=0.5)
+accuracy.tree1 = mean(binary_pred == test$all_star)
+accuracy.tree1
+```
+
+##### Random Forest
+
+```{r, message=FALSE}
+all_star.RF = randomForest(all_star ~., data = train, ntree = 1000)
+varImpPlot(all_star.RF)
+
+RF.pred = predict(all_star.RF, newdata = test)
+accuracy.RF1 = mean(RF.pred == test$all_star)
+accuracy.RF1
+```
+
+##### LDA
+
+```{r, message = FALSE}
+lda.all_star = lda(all_star~.,data=train)
+
+lda.pred = predict(lda.all_star, newdata = test)
+cm_lda1 = table(lda.pred$class, test$all_star)
+accuracy.lda1 = mean(lda.pred$class == test$all_star)
+accuracy.lda1
+```
+
+##### QDA
+
+```{r, message = FALSE}
+qda.all_star = qda(all_star~ .,data=train)
+
+qda.pred = predict(qda.all_star, newdata = test)
+cm_qda1 = cm_qda = table(qda.pred$class, test$all_star)
+accuracy.qda1 = mean(qda.pred$class == test$all_star)
+accuracy.qda1
+```
+
+#### Shrinking Dataset
+
+I've noticed that models tend to love points per game, which makes sense as the best scorers are typically the best players, but because of that it's put major emphasis on taking shots, and is valuing shot attempts really high I'm going only include highly relevant shooting statistics and see if that improves the model
+
+```{r, inlcude = FALSE}
+trimmed_modern_data2 <- dplyr::select(full_modern_data, c(season, player_id, pos:gs, e_fg_percent.x, ft_percent, orb_per_game:pts_per_game, all_star, win_pct))
+
+trimmed_modern_data2 = trimmed_modern_data2[!is.na(trimmed_modern_data2$win_pct), ]
+
+for (i in 1:nrow(trimmed_modern_data2)) {
+  for (j in 1:ncol(trimmed_modern_data2)) {
+    if (is.na(trimmed_modern_data2[i, j])) {
+      trimmed_modern_data2[i, j] <- 0
+    }
+  }
+}
+
+trimmed_modern_data2$pos <- as.factor(trimmed_modern_data2$pos)
+```
+
+Trying Same Models Again
+
+```{r, include = FALSE}
+set.seed(6)
+index <- sample(nrow(trimmed_modern_data2), nrow(trimmed_modern_data2) * 0.7)
+train <- trimmed_modern_data2[index, ]
+test <- trimmed_modern_data2[-index, ]
+
+model.2 <- glm(all_star ~., family = binomial, data = train)
+require(nnet)
+model2.2<- multinom(all_star ~., family = binomial, data = train)
+
+pred= predict(model.2, test, type="response")
+binary_pred = as.numeric(pred>=0.5)
+accuracy.glm2 <- mean(binary_pred == test$all_star)
+accuracy.glm2-accuracy.glm1
+
+pred= predict(model2.2, test)
+accuracy.multinom2 <- mean(pred == test$all_star)
+accuracy.multinom2 - accuracy.multinom1
+
+
+tree.all_star2 <- tree(all_star ~., data = train)
+plot(tree.all_star2)
+text(tree.all_star2, pretty = 0)
+
+#Tree pruning
+cv.all_star2 <- cv.tree(tree.all_star2)
+plot(cv.all_star2$size, cv.all_star2$dev, type='b')
+
+prune.all_star2 = prune.tree(tree.all_star2, best = 8)
+plot(prune.all_star2)
+text(prune.all_star2,pretty =0)
+
+tree.pred = predict(prune.all_star2, newdata = test)
+binary_pred = as.numeric(tree.pred<=0.5)
+accuracy.tree2 = mean(binary_pred == test$all_star)
+accuracy.tree2 - accuracy.tree1
+
+all_star.RF2 = randomForest(all_star ~., data = train, ntree = 1000)
+varImpPlot(all_star.RF2)
+
+RF.pred = predict(all_star.RF2, newdata = test)
+accuracy.RF2 = mean(RF.pred == test$all_star)
+accuracy.RF2 - accuracy.RF1
+
+lda.all_star2 = lda(all_star~.,data=train)
+
+lda.pred2 = predict(lda.all_star2, newdata = test)
+cm_lda2 = table(lda.pred2$class, test$all_star)
+accuracy.lda2 = mean(lda.pred2$class == test$all_star)
+accuracy.lda2 - accuracy.lda1
+
+qda.all_star2 = qda(all_star~ .,data=train)
+
+qda.pred2 = predict(qda.all_star2, newdata = test)
+cm_qda2 = table(qda.pred2$class, test$all_star)
+accuracy.qda2 = mean(qda.pred2$class == test$all_star)
+accuracy.qda2 - accuracy.qda1
+```
+
+#### Expaning Dataset
+
+As we can see, there is marginal improvement, in RF, but marginal regression in GLM and multinational I'm going to now add some more parameters, like win shares, vorp, and other 1 number test metrics.
+
+```{r, include = FALSE}
+advanced <- read.csv("C:/Users/guest_5m51ow7/OneDrive/Documents/School/Stat 462/Project 2 Files/Advanced.csv")
+
+
+trimmed_modern_data3 <- merge(trimmed_modern_data2, advanced, by = c("player_id", "season"))
+
+trimmed_modern_data3 <- dplyr::select(trimmed_modern_data3, c(season, player_id, pos.x:gs, e_fg_percent.x, ft_percent, orb_per_game:pts_per_game, all_star, win_pct, per, ts_percent, ws, bpm, vorp))
+
+trimmed_modern_data3 = trimmed_modern_data3[!is.na(trimmed_modern_data3$win_pct), ]
+
+for (i in 1:nrow(trimmed_modern_data3)) {
+  for (j in 1:ncol(trimmed_modern_data3)) {
+    if (is.na(trimmed_modern_data3[i, j])) {
+      trimmed_modern_data3[i, j] <- 0
+    }
+  }
+}
+
+trimmed_modern_data3$pos <- as.factor(trimmed_modern_data3$pos)
+```
+
+Testing New Data
+
+```{r, include = FALSE}
+set.seed(6)
+index <- sample(nrow(trimmed_modern_data3), nrow(trimmed_modern_data3) * 0.7)
+train <- trimmed_modern_data3[index, ]
+test <- trimmed_modern_data3[-index, ]
+
+model.3 <- glm(all_star ~., family = binomial, data = train)
+require(nnet)
+model2.3<- multinom(all_star ~., family = binomial, data = train)
+
+pred= predict(model.3, test, type="response")
+binary_pred = as.numeric(pred>=0.5)
+accuracy.glm3 <- mean(binary_pred == test$all_star)
+accuracy.glm3-max(accuracy.glm1,accuracy.glm2)
+
+
+pred= predict(model2.3, test)
+accuracy.multinom3<- mean(pred == test$all_star)
+accuracy.multinom3 - max(accuracy.multinom1, accuracy.multinom2)
+
+
+tree.all_star3 <- tree(all_star ~., data = train)
+plot(tree.all_star3)
+text(tree.all_star3, pretty = 0)
+cv.all_star3 <- cv.tree(tree.all_star3)
+plot(cv.all_star3$size, cv.all_star3$dev, type='b')
+
+prune.all_star3 = prune.tree(tree.all_star3, best = 8)
+plot(prune.all_star3)
+text(prune.all_star3,pretty =0)
+tree.pred = predict(prune.all_star3, newdata = test)
+binary_pred = as.numeric(tree.pred<=0.5)
+accuracy.tree3 = mean(binary_pred == test$all_star)
+accuracy.tree3 - max(accuracy.tree1,accuracy.tree2)
+
+all_star.RF3 = randomForest(all_star ~., data = train, ntree = 1000)
+varImpPlot(all_star.RF3)
+
+RF.pred = predict(all_star.RF3, newdata = test)
+accuracy.RF3 = mean(RF.pred == test$all_star)
+accuracy.RF3 - max(accuracy.RF1, accuracy.RF2)
+
+lda.all_star3 = lda(all_star~.,data=train)
+
+lda.pred3 = predict(lda.all_star3, newdata = test)
+cm_lda3 = table(lda.pred3$class, test$all_star)
+accuracy.lda3 = mean(lda.pred3$class == test$all_star)
+accuracy.lda3 - max(accuracy.lda1,accuracy.lda2)
+```
+
+## Results
+
+Comparing Max Accuracy
+
+```{r, message = FALSE}
+GLM_accuracy = max(accuracy.glm1,accuracy.glm2,accuracy.glm3)
+MUL_accuracy = max(accuracy.multinom1,accuracy.multinom2,accuracy.multinom3)
+RF_accuracy = max(accuracy.RF1,accuracy.RF2, accuracy.RF3)
+LDA_accuracy = max(accuracy.lda1,accuracy.lda2, accuracy.lda3)
+QDA_accuracy = max(accuracy.qda1, accuracy.qda2)
+
+cat("Best GLM Accuracy:", GLM_accuracy, "\n")
+cat("Best Multinomial Accuracy:", MUL_accuracy, "\n")
+cat("Best Random Forest Accuracy:", RF_accuracy, "\n")
+cat("Best LDA Accuracy:", LDA_accuracy, "\n")
+cat("BEst QDA Accuracy:", QDA_accuracy, "\n")
+```
+
+Estimating 2024 NBA All Stars
+
+```{r, message=FALSE, warning=FALSE}
+current_season_data <- filter(player_all_star, season == 2024)
+
+current_season_data <- merge(current_season_data, win_percentage, by = c("tm", "season"), all.x = TRUE)
+
+trimmed_current_data <- dplyr::select(current_season_data, c(season, player_id, pos:gs, e_fg_percent.x, ft_percent, orb_per_game:pts_per_game, all_star, win_pct))
+
+
+trimmed_current_data2 <- merge(trimmed_current_data, advanced, by = c("player_id", "season"))
+
+trimmed_current_data2 <- dplyr::select(trimmed_current_data2, c(season, player_id, pos.x:gs, e_fg_percent.x, ft_percent, orb_per_game:pts_per_game, all_star, win_pct, per, ts_percent, ws, bpm, vorp))
+
+trimmed_current_data2 = trimmed_current_data2[!is.na(trimmed_current_data2$win_pct), ]
+
+for (i in 1:nrow(trimmed_current_data2)) {
+  for (j in 1:ncol(trimmed_current_data2)) {
+    if (is.na(trimmed_current_data2[i, j])) {
+      trimmed_current_data2[i, j] <- 0
+    }
+  }
+}
+
+trimmed_current_data2$pos <- as.factor(trimmed_current_data2$pos)
+
+current_all_star = predict(model.3, trimmed_current_data2, type= "response")
+current_all_star = as.numeric(current_all_star>=0.5)
+current_all_star = current_all_star*trimmed_current_data2$player_id
+current_all_star <- Filter(function(x) x != 0, current_all_star)
+
+# Function to find players by player_ids
+find_players_by_ids <- function(ids, data) {
+  players_found <- lapply(ids, function(id) {
+    player <- data[data$player_id == id, "player"]
+    if (length(player) > 0) {
+      return(player)
+    } else {
+      return("Player not found")
+    }
+  })
+  return(players_found)
+}
+
+
+# Find players for the list of IDs
+players_found <- find_players_by_ids(current_all_star, filter(full_dataset, season == 2024))
+
+# Print the result
+print(players_found)
+
+
+```
+# Question 2)
+Creating Target Distribution
+```{r}
+targetdens <- function(x, v){
+  t_dens = ((gamma((v+1)/2))/(gamma(v/2)))*(1/(sqrt(v*pi)))*(1+((x^2)/v))^(-(v+1)/2)
+  return(t_dens)
+}
+```
+
+Creating MH algorithm
+```{r}
+MH <- function(proposal_dens, iterations, v){
+  set.seed(6)
+  x <- 0
+  accepted_samples <- numeric(iterations)
+    for (i in 1:iterations) {
+    # Generate proposal from the proposal density
+      if (proposal_dens == "normal") {
+        y <- rnorm(1, mean = 0, sd = 1)
+      } else if (proposal_dens == "t") {
+        y <- rt(1, df = v, ncp = 0)
+      }
+      acceptance_prob <- min(1, targetdens(y, 6) / targetdens(x, 6))
+      if (runif(1) < acceptance_prob) {
+        x <- y
+        accepted_samples[i] <- x
+      }else{
+        accepted_samples[i] <- x
+    }
+  }
+  return(accepted_samples)
+}
+```
+
+#### 2.i)
+```{r}
+prop = "normal"
+normal_proposal <- MH(prop, 10000, 6)
+hist(normal_proposal)
+```
+
+#### 2.ii)
+```{r}
+t_proposal <- MH("t", 10000, 3)
+hist(t_proposal)
+
+hist(rt(10000,6))
+```
